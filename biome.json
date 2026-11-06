@@ -1,0 +1,771 @@
+{
+  "$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
+  "extends": [
+    "ultracite/biome/core",
+    "ultracite/biome/react",
+    "ultracite/biome/vitest"
+  ],
+  "files": {
+    "includes": [
+      "!!**/dist",
+      "!!**/.wrangler",
+      "!!**/.claude/worktrees",
+      "!!.agents",
+      "!**/*.md",
+      "!**/package-lock.json",
+      "!src/worker/runtime.d.ts",
+      "!!src/worker/vendor"
+    ]
+  },
+  "formatter": {
+    "attributePosition": "multiline",
+    "expand": "auto"
+  },
+  "javascript": {
+    "formatter": {
+      "quoteStyle": "double",
+      "trailingCommas": "all"
+    }
+  },
+  "linter": {
+    "rules": {
+      "preset": "recommended",
+      "correctness": {
+        "noUnusedVariables": {
+          "level": "error",
+          "options": {
+            "ignoreRestSiblings": true
+          }
+        }
+      },
+      "suspicious": {
+        "noConsole": "error"
+      },
+      "style": {
+        "noRestrictedImports": {
+          "level": "error",
+          "options": {
+            "patterns": [
+              {
+                "group": ["@/**", "#*/**"],
+                "message": "Use caminhos relativos para os modulos locais."
+              },
+              {
+                "group": [
+                  "./**/*.ts",
+                  "./**/*.tsx",
+                  "../**/*.ts",
+                  "../**/*.tsx"
+                ],
+                "message": "Omita .ts e .tsx nos imports de codigo do projeto."
+              },
+              {
+                "group": ["./index", "../index", "./**/index", "../**/index"],
+                "message": "Importe o diretorio do modulo; omita /index."
+              }
+            ]
+          }
+        },
+        "noCommonJs": "error",
+        "useImportType": {
+          "level": "error",
+          "options": {
+            "style": "auto"
+          }
+        }
+      },
+      "nursery": {
+        "noFloatingPromises": "error",
+        "noMisusedPromises": "error",
+        "useAwaitThenable": "error",
+        "noUnsafeTypeAssertion": "error",
+        "noUselessTypeConversion": "error",
+        "useImportsFirst": "error"
+      }
+    }
+  },
+  "assist": {
+    "actions": {
+      "source": {
+        "organizeImports": {
+          "level": "on",
+          "options": {
+            "sortBareImports": false,
+            "groups": [
+              ":NODE:",
+              ":BLANK_LINE:",
+              ":PACKAGE:",
+              ":BLANK_LINE:",
+              ":ALIAS:",
+              ":BLANK_LINE:",
+              ":PATH:"
+            ]
+          }
+        }
+      }
+    }
+  },
+  "overrides": [
+    {
+      "includes": ["src/**/*.ts", "src/**/*.tsx"],
+      "linter": {
+        "rules": {
+          "complexity": {
+            "useMaxParams": {
+              "level": "error",
+              "options": {
+                "max": 4
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": ["src/**/__tests__/**", "tests/**/*.ts"],
+      "linter": {
+        "rules": {
+          "complexity": {
+            "noExcessiveCognitiveComplexity": "off",
+            "useMaxParams": "off"
+          },
+          "suspicious": {
+            "noExplicitAny": "error"
+          }
+        }
+      }
+    },
+    {
+      "includes": [
+        "src/worker/**/*.ts",
+        "!src/worker/**/*repository.ts",
+        "!src/worker/**/repository/**/*.ts",
+        "!src/worker/**/entity/index.ts",
+        "!src/worker/composition/index.ts",
+        "!src/worker/database/index.ts",
+        "!src/worker/schema/index.ts",
+        "!src/worker/runtime.d.ts",
+        "!src/worker/**/__tests__/**"
+      ],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "patterns": [
+                  {
+                    "group": ["@/**", "#*/**"],
+                    "message": "Use caminhos relativos para os modulos locais."
+                  },
+                  {
+                    "group": [
+                      "./**/*.ts",
+                      "./**/*.tsx",
+                      "../**/*.ts",
+                      "../**/*.tsx"
+                    ],
+                    "message": "Omita .ts e .tsx nos imports de codigo do projeto."
+                  },
+                  {
+                    "group": [
+                      "drizzle-orm",
+                      "drizzle-orm/**",
+                      "**/database",
+                      "**/database/**",
+                      "**/schema",
+                      "**/schema/**",
+                      "**/repository",
+                      "**/repository/**",
+                      "**/*.repository"
+                    ],
+                    "message": "SQL e D1 pertencem aos repositories; use um service e um contrato de entity."
+                  },
+                  {
+                    "group": [
+                      "./index",
+                      "../index",
+                      "./**/index",
+                      "../**/index"
+                    ],
+                    "message": "Importe o diretorio do modulo; omita /index."
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": [
+        "src/worker/**/service.ts",
+        "src/worker/**/*.service.ts",
+        "!src/worker/**/__tests__/**"
+      ],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "patterns": [
+                  {
+                    "group": ["@/**", "#*/**"],
+                    "message": "Use caminhos relativos para os modulos locais."
+                  },
+                  {
+                    "group": [
+                      "./**/*.ts",
+                      "./**/*.tsx",
+                      "../**/*.ts",
+                      "../**/*.tsx"
+                    ],
+                    "message": "Omita .ts e .tsx nos imports de codigo do projeto."
+                  },
+                  {
+                    "group": [
+                      "drizzle-orm",
+                      "drizzle-orm/**",
+                      "**/database",
+                      "**/database/**",
+                      "**/schema",
+                      "**/schema/**",
+                      "**/repository",
+                      "**/repository/**",
+                      "**/*.repository",
+                      "hono",
+                      "hono/**",
+                      "ky",
+                      "ky/**",
+                      "pluggy-sdk",
+                      "pluggy-sdk/**",
+                      "cloudflare:*",
+                      "@cloudflare/**",
+                      "**/bindings",
+                      "**/bindings/**",
+                      "**/composition",
+                      "**/composition/**",
+                      "**/controller",
+                      "**/controller/**",
+                      "**/*.adapter",
+                      "**/http",
+                      "**/http/**",
+                      "**/web/**",
+                      "**/pluggy/**"
+                    ],
+                    "message": "Services coordenam casos de uso por contratos; persistencia e transporte entram pela composicao."
+                  },
+                  {
+                    "group": [
+                      "./index",
+                      "../index",
+                      "./**/index",
+                      "../**/index"
+                    ],
+                    "message": "Importe o diretorio do modulo; omita /index."
+                  }
+                ]
+              }
+            },
+            "noRestrictedGlobals": {
+              "level": "error",
+              "options": {
+                "deniedGlobals": {
+                  "fetch": "Injete uma porta de origem no service; HTTP pertence ao adapter.",
+                  "D1Database": "D1 pertence ao repository.",
+                  "Request": "Request pertence ao controller.",
+                  "Response": "Response pertence ao controller."
+                }
+              }
+            },
+            "noRestrictedTypes": {
+              "level": "error",
+              "options": {
+                "types": {
+                  "D1Database": "D1 pertence ao repository; declare uma porta em entity.ts.",
+                  "D1PreparedStatement": "Statements pertencem ao repository.",
+                  "Request": "Request pertence ao controller.",
+                  "Response": "Response pertence ao controller.",
+                  "Bindings": "Bindings pertencem a composicao e aos adapters."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": ["src/worker/**/entity/index.ts"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "patterns": [
+                  {
+                    "group": ["@/**", "#*/**"],
+                    "message": "Use caminhos relativos para os modulos locais."
+                  },
+                  {
+                    "group": [
+                      "./**/*.ts",
+                      "./**/*.tsx",
+                      "../**/*.ts",
+                      "../**/*.tsx"
+                    ],
+                    "message": "Omita .ts e .tsx nos imports de codigo do projeto."
+                  },
+                  {
+                    "group": [
+                      "drizzle-orm",
+                      "drizzle-orm/**",
+                      "**/database",
+                      "**/database/**",
+                      "**/repository",
+                      "**/repository/**",
+                      "**/*.repository",
+                      "hono",
+                      "hono/**",
+                      "ky",
+                      "ky/**",
+                      "pluggy-sdk",
+                      "pluggy-sdk/**",
+                      "cloudflare:*",
+                      "@cloudflare/**",
+                      "**/bindings",
+                      "**/bindings/**",
+                      "**/composition",
+                      "**/composition/**",
+                      "**/controller",
+                      "**/controller/**",
+                      "**/*.adapter",
+                      "**/http",
+                      "**/http/**",
+                      "**/web/**",
+                      "**/pluggy/**",
+                      "**/service",
+                      "**/*.service"
+                    ],
+                    "message": "Entities definem modelos, portas e regras puras; nao dependem de implementacoes."
+                  },
+                  {
+                    "group": [
+                      "**/installation",
+                      "**/auth",
+                      "**/finance",
+                      "**/sync",
+                      "**/index",
+                      "**/planning",
+                      "**/household"
+                    ],
+                    "message": "Use o indice de entity para portas; os indices publicos da aplicacao expoem services."
+                  },
+                  {
+                    "group": [
+                      "./index",
+                      "../index",
+                      "./**/index",
+                      "../**/index"
+                    ],
+                    "message": "Importe o diretorio do modulo; omita /index."
+                  }
+                ]
+              }
+            },
+            "noRestrictedGlobals": {
+              "level": "error",
+              "options": {
+                "deniedGlobals": {
+                  "fetch": "Injete uma porta de origem no service; HTTP pertence ao adapter.",
+                  "D1Database": "D1 pertence ao repository.",
+                  "Request": "Request pertence ao controller.",
+                  "Response": "Response pertence ao controller."
+                }
+              }
+            },
+            "noRestrictedTypes": {
+              "level": "error",
+              "options": {
+                "types": {
+                  "D1Database": "D1 pertence ao repository; declare uma porta em entity.ts.",
+                  "D1PreparedStatement": "Statements pertencem ao repository.",
+                  "Request": "Request pertence ao controller.",
+                  "Response": "Response pertence ao controller.",
+                  "Bindings": "Bindings pertencem a composicao e aos adapters."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": [
+        "src/worker/**/*repository.ts",
+        "src/worker/**/repository/**/*.ts"
+      ],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "patterns": [
+                  {
+                    "group": ["@/**", "#*/**"],
+                    "message": "Use caminhos relativos para os modulos locais."
+                  },
+                  {
+                    "group": [
+                      "./**/*.ts",
+                      "./**/*.tsx",
+                      "../**/*.ts",
+                      "../**/*.tsx"
+                    ],
+                    "message": "Omita .ts e .tsx nos imports de codigo do projeto."
+                  },
+                  {
+                    "group": [
+                      "hono",
+                      "hono/**",
+                      "ky",
+                      "ky/**",
+                      "pluggy-sdk",
+                      "pluggy-sdk/**",
+                      "cloudflare:*",
+                      "@cloudflare/**",
+                      "**/bindings",
+                      "**/bindings/**",
+                      "**/composition",
+                      "**/composition/**",
+                      "**/controller",
+                      "**/controller/**",
+                      "**/*.adapter",
+                      "**/http",
+                      "**/http/**",
+                      "**/web/**",
+                      "**/pluggy/**",
+                      "**/service",
+                      "**/*.service"
+                    ],
+                    "message": "Repositories fazem persistencia; services coordenam os casos de uso e adapters fazem HTTP."
+                  },
+                  {
+                    "group": [
+                      "**/installation",
+                      "**/auth",
+                      "**/finance",
+                      "**/sync",
+                      "**/index",
+                      "**/planning",
+                      "**/household"
+                    ],
+                    "message": "Use o indice de entity para portas; os indices publicos da aplicacao expoem services."
+                  },
+                  {
+                    "group": [
+                      "./index",
+                      "../index",
+                      "./**/index",
+                      "../**/index"
+                    ],
+                    "message": "Importe o diretorio do modulo; omita /index."
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": [
+        "src/domain/**/*.ts",
+        "src/contracts/**/*.ts",
+        "src/shared/**/*.ts",
+        "!src/**/__tests__/**"
+      ],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "patterns": [
+                  {
+                    "group": ["@/**", "#*/**"],
+                    "message": "Use caminhos relativos para os modulos locais."
+                  },
+                  {
+                    "group": [
+                      "./**/*.ts",
+                      "./**/*.tsx",
+                      "../**/*.ts",
+                      "../**/*.tsx"
+                    ],
+                    "message": "Omita .ts e .tsx nos imports de codigo do projeto."
+                  },
+                  {
+                    "group": [
+                      "**/worker/**",
+                      "**/web/**",
+                      "drizzle-orm",
+                      "drizzle-orm/**"
+                    ],
+                    "message": "Dominio, contratos e utilitarios nao dependem do Worker, da UI ou do banco."
+                  },
+                  {
+                    "group": [
+                      "./index",
+                      "../index",
+                      "./**/index",
+                      "../**/index"
+                    ],
+                    "message": "Importe o diretorio do modulo; omita /index."
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": [
+        "src/domain/**/*.ts",
+        "src/shared/**/*.ts",
+        "!src/**/__tests__/**"
+      ],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "patterns": [
+                  {
+                    "group": ["@/**", "#*/**"],
+                    "message": "Use caminhos relativos para os modulos locais."
+                  },
+                  {
+                    "group": [
+                      "./**/*.ts",
+                      "./**/*.tsx",
+                      "../**/*.ts",
+                      "../**/*.tsx"
+                    ],
+                    "message": "Omita .ts e .tsx nos imports de codigo do projeto."
+                  },
+                  {
+                    "group": [
+                      "**/worker/**",
+                      "**/web/**",
+                      "drizzle-orm",
+                      "drizzle-orm/**"
+                    ],
+                    "message": "Dominio, contratos e utilitarios nao dependem do Worker, da UI ou do banco."
+                  },
+                  {
+                    "group": [
+                      "./index",
+                      "../index",
+                      "./**/index",
+                      "../**/index"
+                    ],
+                    "message": "Importe o diretorio do modulo; omita /index."
+                  },
+                  {
+                    "group": [
+                      "**/contracts",
+                      "**/contracts/**",
+                      "**/domain",
+                      "**/domain/**"
+                    ],
+                    "message": "Dominio e utilitarios nao dependem de contratos de transporte; shared permanece independente do dominio."
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": [
+        "src/web/**/*.ts",
+        "src/web/**/*.tsx",
+        "!src/web/**/__tests__/**"
+      ],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "patterns": [
+                  {
+                    "group": ["@/**", "#*/**"],
+                    "message": "Use caminhos relativos para os modulos locais."
+                  },
+                  {
+                    "group": [
+                      "./**/*.ts",
+                      "./**/*.tsx",
+                      "../**/*.ts",
+                      "../**/*.tsx"
+                    ],
+                    "message": "Omita .ts e .tsx nos imports de codigo do projeto."
+                  },
+                  {
+                    "group": ["**/worker/**", "drizzle-orm", "drizzle-orm/**"],
+                    "message": "Frontend consome contratos e HTTP; nao importa modulos do backend."
+                  },
+                  {
+                    "group": [
+                      "./index",
+                      "../index",
+                      "./**/index",
+                      "../**/index"
+                    ],
+                    "message": "Importe o diretorio do modulo; omita /index."
+                  },
+                  {
+                    "group": ["@cloudflare/kumo"],
+                    "message": "Use a entrada especifica de @cloudflare/kumo; o barrel inclui dependencias de navegador no Worker."
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": [
+        "src/worker/**/*.ts",
+        "!src/worker/**/*repository.ts",
+        "!src/worker/**/repository/**/*.ts",
+        "!src/worker/**/entity/index.ts",
+        "!src/worker/*/controller/**/*.ts",
+        "!src/worker/auth/session/index.ts",
+        "!src/worker/auth/grants/index.ts",
+        "!src/worker/pluggy/**",
+        "!src/worker/sync/workflow/index.ts",
+        "!src/worker/rules/workflow/index.ts",
+        "!src/worker/index.ts",
+        "!src/worker/composition/index.ts",
+        "!src/worker/bindings/index.ts",
+        "!src/worker/database/index.ts",
+        "!src/worker/schema/index.ts",
+        "!src/worker/http/index.ts",
+        "!src/worker/observability/index.ts",
+        "!src/worker/runtime.d.ts",
+        "!src/worker/**/__tests__/**",
+        "!src/worker/mcp/index.ts"
+      ],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "patterns": [
+                  {
+                    "group": ["@/**", "#*/**"],
+                    "message": "Use caminhos relativos para os modulos locais."
+                  },
+                  {
+                    "group": [
+                      "./**/*.ts",
+                      "./**/*.tsx",
+                      "../**/*.ts",
+                      "../**/*.tsx"
+                    ],
+                    "message": "Omita .ts e .tsx nos imports de codigo do projeto."
+                  },
+                  {
+                    "group": [
+                      "drizzle-orm",
+                      "drizzle-orm/**",
+                      "**/database",
+                      "**/database/**",
+                      "**/schema",
+                      "**/schema/**",
+                      "**/repository",
+                      "**/repository/**",
+                      "**/*.repository",
+                      "hono",
+                      "hono/**",
+                      "ky",
+                      "ky/**",
+                      "pluggy-sdk",
+                      "pluggy-sdk/**",
+                      "cloudflare:*",
+                      "@cloudflare/**",
+                      "**/bindings",
+                      "**/bindings/**",
+                      "**/composition",
+                      "**/composition/**",
+                      "**/controller",
+                      "**/controller/**",
+                      "**/*.adapter",
+                      "**/http",
+                      "**/http/**",
+                      "**/web/**",
+                      "**/pluggy/**"
+                    ],
+                    "message": "Services coordenam casos de uso por contratos; persistencia e transporte entram pela composicao."
+                  },
+                  {
+                    "group": [
+                      "./index",
+                      "../index",
+                      "./**/index",
+                      "../**/index"
+                    ],
+                    "message": "Importe o diretorio do modulo; omita /index."
+                  }
+                ]
+              }
+            },
+            "noRestrictedGlobals": {
+              "level": "error",
+              "options": {
+                "deniedGlobals": {
+                  "fetch": "Injete uma porta de origem no service; HTTP pertence ao adapter.",
+                  "D1Database": "D1 pertence ao repository.",
+                  "Request": "Request pertence ao controller.",
+                  "Response": "Response pertence ao controller."
+                }
+              }
+            },
+            "noRestrictedTypes": {
+              "level": "error",
+              "options": {
+                "types": {
+                  "D1Database": "D1 pertence ao repository; declare uma porta em entity.ts.",
+                  "D1PreparedStatement": "Statements pertencem ao repository.",
+                  "Request": "Request pertence ao controller.",
+                  "Response": "Response pertence ao controller.",
+                  "Bindings": "Bindings pertencem a composicao e aos adapters."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "includes": ["src/**/index.ts", "tests/support/**/index.ts"],
+      "linter": {
+        "rules": {
+          "performance": {
+            "noBarrelFile": "off"
+          }
+        }
+      }
+    }
+  ]
+}

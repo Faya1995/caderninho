@@ -1,0 +1,125 @@
+import assert from "node:assert/strict";
+
+import { beforeEach, test } from "vitest";
+
+import {
+  PortalTransactionListSchema,
+  TransactionListSchema,
+} from "../../src/contracts";
+import {
+  transactionIdentification,
+  transactionIdentificationInput,
+} from "../../src/fixtures/transaction-identification";
+import { createFinancialService } from "../../src/worker/finance";
+import { createFinancialRepository } from "../../src/worker/finance/repository";
+import { command, cookies, fixture, login } from "./access-fixture";
+import { account, collect, setup, source, transaction } from "./fixture";
+import { env } from "cloudflare:workers";
+
+beforeEach(setup);
+
+for (const description of ["Compra sintética", "synthetic ".repeat(60_000)]) {
+  test(`reimport clears withdrawn source card metadata atomically (${description.length} characters)`, async () => {
+    const accounts = [account({ type: "CREDIT" })];
+    const rows = [1, 2].map((installmentNumber) =>
+      transaction({
+        creditCardMetadata: {
+          cardNumber: "1234",
+          installmentNumber,
+          purchaseDate: "2024-01-01",
+          totalInstallments: 2,
+        },
+        date: `2024-0${installmentNumber}-01`,
+        description,
+        id: `installment-${installmentNumber}`,
+      }),
+    );
+    await collect(source(rows, accounts));
+    const app = fixture();
+    const cookie = cookies(await login(app));
+    const purchases = async () => {
+      const response = await command(app, cookie, "query", {
+        query: { spaceId: "personal", tool: "get_portal_transactions" },
+      });
+      assert.equal(response.status, 200);
+      return PortalTransactionListSchema.parse(await response.json()).data
+        .records;
+    };
+    assert.equal((await purchases())[0]?.installments.length, 2);
+    await collect(
+      source(
+        rows.map((row) => ({ ...row, creditCardMetadata: null })),
+        accounts,
+      ),
+      "2026-10-02T00:00:00Z",
+    );
+    const updated = await purchases();
+    assert.equal(updated.length, 2);
+    for (const row of updated) {
+      assert.equal(row.cardNumber, null);
+      assert.equal(row.purchaseDate, null);
+      assert.deepEqual(row.installments, []);
+    }
+  });
+}
+
+test("identification survives atomic import, financial queries, portal/MCP planning queries and metadata-only reimports", async () => {
+  const row = transaction({ ...transactionIdentificationInput });
+  await collect(source([row]));
+  const finance = createFinancialService(createFinancialRepository(env.DB));
+  assert.deepEqual(
+    (await finance.query({ limit: 10 })).records[0]?.identification,
+    transactionIdentification,
+  );
+  const app = fixture();
+  const cookie = cookies(await login(app));
+  await Promise.all(
+    ["get_transactions", "get_portal_transactions"].map(async (tool) => {
+      const response = await command(app, cookie, "query", {
+        query: { spaceId: "personal", text: "00000000000191", tool },
+      });
+      assert.equal(response.status, 200);
+      const body: unknown = await response.json();
+      const result =
+        tool === "get_transactions"
+          ? TransactionListSchema.parse(body)
+          : PortalTransactionListSchema.parse(body);
+      assert.equal(result.data.records.length, 1);
+      assert.deepEqual(
+        result.data.records[0]?.identification,
+        transactionIdentification,
+      );
+    }),
+  );
+  await env.DB.exec(
+    "CREATE TRIGGER reject_identity_noop BEFORE UPDATE ON transactions BEGIN SELECT RAISE(ABORT,'UNNECESSARY_TRANSACTION_WRITE'); END;",
+  );
+  await collect(source([row]), "2026-10-02T00:00:00Z");
+  await env.DB.exec("DROP TRIGGER reject_identity_noop");
+  await collect(
+    source([
+      { ...row, merchant: { ...row.merchant, name: "Novo nome sintético" } },
+    ]),
+    "2026-10-03T00:00:00Z",
+  );
+  const [updated] = (await finance.query({ limit: 10 })).records;
+  assert.ok(updated);
+  assert.equal(updated.identification?.merchant?.name, "Novo nome sintético");
+  assert.equal(updated.amountMinor, "-1000");
+  await collect(source([transaction()]), "2026-10-04T00:00:00Z");
+  assert.equal(
+    (await finance.query({ limit: 10 })).records[0]?.identification,
+    null,
+  );
+});
+
+test("large-page scalar writes preserve identification exactly", async () => {
+  const description = "synthetic ".repeat(60_000);
+  await collect(
+    source([transaction({ ...transactionIdentificationInput, description })]),
+  );
+  const finance = createFinancialService(createFinancialRepository(env.DB));
+  const [row] = (await finance.query({ limit: 1 })).records;
+  assert.equal(row?.description, description);
+  assert.deepEqual(row?.identification, transactionIdentification);
+});

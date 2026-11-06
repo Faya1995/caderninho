@@ -1,0 +1,275 @@
+import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
+import { Hono } from "hono";
+import { deleteCookie, getCookie, setCookie } from "hono/cookie";
+import { z } from "zod/v4";
+
+import { AccountFailureCodeSchema } from "../../../contracts";
+import { tryCatch } from "../../../shared";
+import { accessPage, consentPage, renderPage } from "../../../web";
+import type { Bindings } from "../../bindings";
+import {
+  boundedForm,
+  failureStatus,
+  requestCategory,
+  requestOrigin,
+} from "../../http";
+import { installationRoutes } from "../../installation/controller";
+import {
+  FailureCode,
+  markFailure,
+  observeSpan,
+  SpanName,
+} from "../../observability";
+import { returnPath, token, verifyAdminAccess } from "../service";
+import {
+  configuredAccess,
+  cookieOptions,
+  createSession,
+  type PortalEnv,
+  readSession,
+} from "../session";
+
+type McpHandler = (
+  request: Request,
+  env: Bindings,
+  access: {
+    clientId: string | null;
+    keepAlive: (lifetime: Promise<void>) => void;
+  },
+) => Promise<Response>;
+
+export function oauth(api: McpHandler, origin: string) {
+  const routes = new Hono<{ Bindings: Bindings }>();
+  routes.onError((error) => {
+    throw error;
+  });
+  routes.route("/", portalRoutes());
+  routes.get("/authorize", async (c) => {
+    if (!(await readSession(c))) {
+      const url = new URL(c.req.url);
+      return c.redirect(
+        "/account/login?returnTo=" +
+          encodeURIComponent(url.pathname + url.search),
+      );
+    }
+    const { raw: request } = c.req,
+      { env: bindings } = c,
+      { OAUTH_PROVIDER: helpers } = bindings;
+    const auth = await helpers.parseAuthRequest(request),
+      details = await helpers.describeConsent(auth),
+      consent = await helpers.beginConsent(auth);
+    consent.headers.set("Content-Type", "text/html; charset=utf-8");
+    consent.headers.set("Referrer-Policy", "same-origin");
+    consent.headers.set(
+      "Content-Security-Policy",
+      `default-src 'none'; font-src 'self'; style-src 'self' 'unsafe-inline'; form-action 'self' ${new URL(auth.redirectUri).origin}; frame-ancestors 'none'; base-uri 'none'`,
+    );
+    return new Response(renderPage(consentPage(details, consent.handle)), {
+      headers: consent.headers,
+    });
+  });
+  routes.post("/authorize", async (c) => {
+    const { raw: request } = c.req,
+      { env: bindings } = c,
+      { OAUTH_PROVIDER: helpers } = bindings;
+    if (request.headers.get("Origin") !== origin) {
+      return c.text("Origem não autorizada.", 403);
+    }
+    if (
+      !request.headers
+        .get("Content-Type")
+        ?.startsWith("application/x-www-form-urlencoded")
+    ) {
+      return c.text("Formato inválido.", 415);
+    }
+    const session = await readSession(c);
+    if (!session) {
+      return c.text("Sessão expirada. Reabra a conexão pelo assistente.", 401);
+    }
+    const form = await boundedForm(request),
+      handle = String(form.get("handle"));
+    if (form.get("decision") !== "approve") {
+      const denied = await helpers.denyConsent(request, handle);
+      return new Response(null, { headers: denied.headers, status: 302 });
+    }
+    const approved = await helpers.approveConsent(request, handle);
+    const result = await helpers.completeAuthorization({
+      metadata: {},
+      props: {},
+      request: approved.request,
+      scope: approved.request.scope,
+      userId: "owner",
+    });
+    approved.headers.set("Location", result.redirectTo);
+    return new Response(null, { headers: approved.headers, status: 302 });
+  });
+
+  return new OAuthProvider<Bindings>({
+    apiHandler: {
+      fetch: (request, bindings, context) => {
+        // OAuthProvider verifies this context from the token, never from request headers.
+        const identity = z
+          .object({ auth: z.object({ clientId: z.string().optional() }) })
+          .parse(context);
+        return api(request, bindings, {
+          clientId: identity.auth.clientId ?? null,
+          keepAlive: (lifetime) => context.waitUntil(lifetime),
+        });
+      },
+    },
+    apiRoute: "/mcp",
+    authorizeEndpoint: "/authorize",
+    clientRegistrationEndpoint: "/oauth/register",
+    defaultHandler: {
+      fetch: (request, bindings, ctx) => routes.fetch(request, bindings, ctx),
+    },
+    resourceMetadata: {
+      authorization_servers: [origin],
+      resource: `${origin}/mcp`,
+    },
+    scopesSupported: ["offline_access"],
+    tokenEndpoint: "/oauth/token",
+  });
+}
+
+export function authenticatedFetch(
+  request: Request,
+  env: Bindings,
+  ctx: ExecutionContext,
+  api: McpHandler,
+) {
+  return observeSpan(
+    SpanName.authentication,
+    async (span) => {
+      const { data, error } = await tryCatch(() =>
+        oauth(api, requestOrigin(request)).fetch(request, env, ctx),
+      );
+      if (error) {
+        markFailure(error, { phase: SpanName.authentication });
+        const code = AccountFailureCodeSchema.safeParse(error.message);
+        const status =
+          code.success && code.data === "UPSTREAM_AUTH"
+            ? 400
+            : failureStatus(error);
+        span.annotate({ status });
+        return Response.json(
+          { error: "AUTHENTICATION_OR_REQUEST_FAILED" },
+          {
+            headers: {
+              "Cache-Control": "no-store",
+              ...(code.success && { "X-Caderninho-Error": code.data }),
+            },
+            status,
+          },
+        );
+      }
+      span.annotate({ status: data.status });
+      return data;
+    },
+    requestCategory(new URL(request.url).pathname),
+  );
+}
+
+const loginCookie = "__Host-caderninho-login";
+
+function loginRoutes() {
+  const app = new Hono<PortalEnv>();
+  app.get("/account/login", async (c) => {
+    const target = returnPath(c.req.query("returnTo"));
+    if (await readSession(c)) {
+      return c.redirect(target);
+    }
+    const csrf = token();
+    setCookie(c, loginCookie, csrf, { ...cookieOptions, maxAge: 600 });
+    const access = configuredAccess(c);
+    const configured = !!access;
+    if (!configured) {
+      markFailure(new Error(FailureCode.INSTALLATION_INCOMPLETE), {
+        phase: SpanName.authentication,
+      });
+    }
+    return c.html(
+      renderPage(
+        accessPage({
+          configured,
+          csrf,
+          error: "",
+          generated: !!access?.generated,
+          origin: requestOrigin(c.req.raw),
+          target,
+        }),
+      ),
+      configured ? 200 : 503,
+    );
+  });
+  app.post("/account/login", async (c) => {
+    if (c.req.header("Origin") !== requestOrigin(c.req.raw)) {
+      return c.text("Origem não autorizada.", 403);
+    }
+    if (
+      !c.req
+        .header("Content-Type")
+        ?.startsWith("application/x-www-form-urlencoded")
+    ) {
+      return c.text("Formato inválido.", 415);
+    }
+    const access = configuredAccess(c);
+    if (!access) {
+      markFailure(new Error(FailureCode.INSTALLATION_INCOMPLETE), {
+        phase: SpanName.authentication,
+      });
+      return c.text("Acesso não configurado.", 503);
+    }
+    const form = await boundedForm(c.req.raw);
+    const target = returnPath(form.get("returnTo") ?? undefined);
+    const csrf = getCookie(c, loginCookie);
+    if (!csrf || form.get("csrf") !== csrf) {
+      return c.text("Atualize a página para entrar novamente.", 403);
+    }
+    if (
+      !(
+        await c.env.LOGIN_LIMITER.limit({
+          key: c.req.header("CF-Connecting-IP") ?? "local",
+        })
+      ).success
+    ) {
+      c.header("Retry-After", "60");
+      return c.html(
+        renderPage(
+          accessPage({
+            configured: true,
+            csrf,
+            error: "Limite de tentativas. Aguarde 60 segundos.",
+            generated: access.generated,
+            origin: requestOrigin(c.req.raw),
+            target,
+          }),
+        ),
+        429,
+      );
+    }
+    if (!(await verifyAdminAccess(access, form.get("password") ?? ""))) {
+      return c.html(
+        renderPage(
+          accessPage({
+            configured: true,
+            csrf,
+            error: access.generated ? "Chave inválida." : "Senha inválida.",
+            generated: access.generated,
+            origin: requestOrigin(c.req.raw),
+            target,
+          }),
+        ),
+        401,
+      );
+    }
+    await createSession(c);
+    deleteCookie(c, loginCookie, cookieOptions);
+    return c.redirect(target, 303);
+  });
+  return app;
+}
+
+function portalRoutes() {
+  return installationRoutes(loginRoutes());
+}

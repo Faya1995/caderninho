@@ -1,0 +1,13 @@
+# Apenas para desenvolvimento local: copie para .dev.vars e use fixtures.
+# No botão Cloudflare, .dev.vars.example na raiz declara somente a senha de entrada.
+# Para desenvolvimento, escolha também uma senha de 16 a 256 caracteres:
+ADMIN_PASSWORD=
+# Compatibilidade com instalações anteriores que usam uma chave gerada:
+ADMIN_ACCESS_HASH=
+# O onboarding configura Pluggy por pessoa dentro da instalação.
+# Fallback opcional para instalações que já usam secrets de ambiente:
+PLUGGY_CLIENT_ID=
+PLUGGY_CLIENT_SECRET=
+
+# Opcional: apenas se cadastrar webhooks na Pluggy.
+# WEBHOOK_SECRET=

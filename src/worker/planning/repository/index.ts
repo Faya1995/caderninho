@@ -1,0 +1,745 @@
+import { and, asc, desc, eq, gt, gte, lt, lte, or, sql } from "drizzle-orm";
+import type { BatchItem } from "drizzle-orm/batch";
+
+import {
+  connectionPartial,
+  financialIdentity,
+  TransactionOrder,
+  type TransactionProjection,
+} from "../../../domain";
+import { database, required } from "../../database";
+import {
+  connectionOwners,
+  connections,
+  people,
+  planningAccountDetails,
+  planningAccounts,
+  planningBillPayments,
+  planningBills,
+  planningCards,
+  planningCategories,
+  planningContributions,
+  planningEdits,
+  planningGoals,
+  planningInstallments,
+  planningInvestments,
+  planningLoans,
+  planningMonthlyRollups,
+  planningNotifications,
+  planningReceipts,
+  planningRecurrences,
+  planningReserves,
+  planningRevision,
+  planningRules,
+  planningSchedules,
+  planningSpaces,
+  planningTags,
+  planningTransactionDetails,
+  transactions,
+} from "../../schema";
+import type {
+  MonthlyRollup,
+  PlanningRepository,
+  PlanningSnapshot,
+  TransactionRead,
+} from "../entity";
+
+function importedAccounts(
+  origins: PlanningSnapshot["connections"],
+  owners: PlanningSnapshot["owners"],
+  persons: PlanningSnapshot["people"],
+) {
+  return origins.flatMap((c) =>
+    Object.entries(c.accounts).map(([id, a]) => ({
+      ...a,
+      connectionId: c.id,
+      hidden: false,
+      id,
+      identity: financialIdentity({
+        identity: a.identity,
+        institution: owners.find((o) => o.connectionId === c.id)?.institution,
+      }),
+      manual: false,
+      personId: owners.find((o) => o.connectionId === c.id)?.personId ?? "self",
+      personName:
+        persons.find(
+          (p) =>
+            p.id ===
+            (owners.find((o) => o.connectionId === c.id)?.personId ?? "self"),
+        )?.name ?? "Eu",
+      profileId:
+        owners.find((o) => o.connectionId === c.id)?.profileId ?? "default",
+      spaceId: "personal",
+    })),
+  );
+}
+
+function sourceFilter(selection?: TransactionRead) {
+  if (!selection) {
+    return;
+  }
+  const [accountId] = selection.accountIds;
+  return and(
+    selection.accountIds.length === 1 && accountId
+      ? eq(transactions.accountId, accountId)
+      : sql`${transactions.accountId} IN (SELECT value FROM json_each(${JSON.stringify(selection.accountIds)}))`,
+    selection.from ? gte(transactions.date, selection.from) : undefined,
+    selection.to ? lte(transactions.date, selection.to) : undefined,
+    selection.excludeIds.length
+      ? sql`${transactions.id} NOT IN (SELECT value FROM json_each(${JSON.stringify(selection.excludeIds)}))`
+      : undefined,
+  );
+}
+function sourceOrder(order: TransactionRead["order"]) {
+  const dated = order !== TransactionOrder.id;
+  const descending = order === TransactionOrder.date_desc;
+  const compare = descending ? lt : gt;
+  const sort = descending ? desc : asc;
+  return {
+    columns: dated
+      ? [sort(transactions.date), sort(transactions.id)]
+      : [asc(transactions.id)],
+    following(after?: string) {
+      if (!after) {
+        return;
+      }
+      if (!dated) {
+        return gt(transactions.id, after);
+      }
+      return or(
+        compare(transactions.date, after.slice(0, 10)),
+        and(
+          eq(transactions.date, after.slice(0, 10)),
+          compare(transactions.id, after.slice(11)),
+        ),
+      );
+    },
+    key: (row: TransactionProjection) =>
+      dated ? `${row.date}:${row.id}` : row.id,
+  };
+}
+
+function changedRows<T extends { id: string }>(before: T[], after: T[]) {
+  const old = new Map(before.map((row) => [row.id, JSON.stringify(row)]));
+  const current = new Set(after.map((row) => row.id));
+  return {
+    deleted: [...old.keys()].filter((id) => !current.has(id)),
+    upserts: after.filter((row) => old.get(row.id) !== JSON.stringify(row)),
+  };
+}
+export function createPlanningRepository(
+  binding: D1Database,
+): PlanningRepository {
+  const db = database(binding);
+  async function revision() {
+    return required(await db.select().from(planningRevision).get()).revision;
+  }
+  return {
+    async commit(input) {
+      const writes: BatchItem<"sqlite">[] = [
+        db
+          .update(planningRevision)
+          .set({
+            revision: sql`CASE WHEN revision=${input.before.revision} THEN revision+1 ELSE -1 END`,
+          })
+          .where(eq(planningRevision.id, 1)),
+        db.insert(planningReceipts).values({
+          createdAt: input.now,
+          digest: input.digest,
+          id: input.key,
+          result: input.result,
+        }),
+      ];
+      {
+        const changes = changedRows(
+          input.before.state.spaces,
+          input.state.spaces,
+        );
+        writes.push(
+          ...changes.upserts.map((row) =>
+            db
+              .insert(planningSpaces)
+              .values({ data: row, id: row.id })
+              .onConflictDoUpdate({
+                set: { data: row },
+                target: planningSpaces.id,
+              }),
+          ),
+          ...changes.deleted.map((id) =>
+            db.delete(planningSpaces).where(eq(planningSpaces.id, id)),
+          ),
+        );
+      }
+      {
+        const changes = changedRows(
+          input.before.state.accounts,
+          input.state.accounts,
+        );
+        writes.push(
+          ...changes.upserts.map((row) =>
+            db
+              .insert(planningAccounts)
+              .values({ data: row, id: row.id })
+              .onConflictDoUpdate({
+                set: { data: row },
+                target: planningAccounts.id,
+              }),
+          ),
+          ...changes.deleted.map((id) =>
+            db.delete(planningAccounts).where(eq(planningAccounts.id, id)),
+          ),
+        );
+      }
+      {
+        const changes = changedRows(
+          input.before.state.cards,
+          input.state.cards,
+        );
+        writes.push(
+          ...changes.upserts.map((row) =>
+            db
+              .insert(planningCards)
+              .values({ data: row, id: row.id })
+              .onConflictDoUpdate({
+                set: { data: row },
+                target: planningCards.id,
+              }),
+          ),
+          ...changes.deleted.map((id) =>
+            db.delete(planningCards).where(eq(planningCards.id, id)),
+          ),
+        );
+      }
+      {
+        const changes = changedRows(
+          input.before.state.edits,
+          input.state.edits,
+        );
+        writes.push(
+          ...changes.upserts.map((row) =>
+            db
+              .insert(planningEdits)
+              .values({ data: row, id: row.id })
+              .onConflictDoUpdate({
+                set: { data: row },
+                target: planningEdits.id,
+              }),
+          ),
+          ...changes.deleted.map((id) =>
+            db.delete(planningEdits).where(eq(planningEdits.id, id)),
+          ),
+        );
+      }
+      {
+        const changes = changedRows(
+          input.before.state.categories,
+          input.state.categories,
+        );
+        writes.push(
+          ...changes.upserts.map((row) =>
+            db
+              .insert(planningCategories)
+              .values({ data: row, id: row.id })
+              .onConflictDoUpdate({
+                set: { data: row },
+                target: planningCategories.id,
+              }),
+          ),
+          ...changes.deleted.map((id) =>
+            db.delete(planningCategories).where(eq(planningCategories.id, id)),
+          ),
+        );
+      }
+      {
+        const changes = changedRows(input.before.state.tags, input.state.tags);
+        writes.push(
+          ...changes.upserts.map((row) =>
+            db
+              .insert(planningTags)
+              .values({ data: row, id: row.id })
+              .onConflictDoUpdate({
+                set: { data: row },
+                target: planningTags.id,
+              }),
+          ),
+          ...changes.deleted.map((id) =>
+            db.delete(planningTags).where(eq(planningTags.id, id)),
+          ),
+        );
+      }
+      {
+        const changes = changedRows(
+          input.before.state.rules,
+          input.state.rules,
+        );
+        writes.push(
+          ...changes.upserts.map((row) =>
+            db
+              .insert(planningRules)
+              .values({ data: row, id: row.id })
+              .onConflictDoUpdate({
+                set: { data: row },
+                target: planningRules.id,
+              }),
+          ),
+          ...changes.deleted.map((id) =>
+            db.delete(planningRules).where(eq(planningRules.id, id)),
+          ),
+        );
+      }
+      {
+        const changes = changedRows(
+          input.before.state.recurrences,
+          input.state.recurrences,
+        );
+        writes.push(
+          ...changes.upserts.map((row) =>
+            db
+              .insert(planningRecurrences)
+              .values({ data: row, id: row.id })
+              .onConflictDoUpdate({
+                set: { data: row },
+                target: planningRecurrences.id,
+              }),
+          ),
+          ...changes.deleted.map((id) =>
+            db
+              .delete(planningRecurrences)
+              .where(eq(planningRecurrences.id, id)),
+          ),
+        );
+      }
+      {
+        const changes = changedRows(
+          input.before.state.installments,
+          input.state.installments,
+        );
+        writes.push(
+          ...changes.upserts.map((row) =>
+            db
+              .insert(planningInstallments)
+              .values({ data: row, id: row.id })
+              .onConflictDoUpdate({
+                set: { data: row },
+                target: planningInstallments.id,
+              }),
+          ),
+          ...changes.deleted.map((id) =>
+            db
+              .delete(planningInstallments)
+              .where(eq(planningInstallments.id, id)),
+          ),
+        );
+      }
+      {
+        const changes = changedRows(
+          input.before.state.reserves,
+          input.state.reserves,
+        );
+        writes.push(
+          ...changes.upserts.map((row) =>
+            db
+              .insert(planningReserves)
+              .values({ data: row, id: row.id })
+              .onConflictDoUpdate({
+                set: { data: row },
+                target: planningReserves.id,
+              }),
+          ),
+          ...changes.deleted.map((id) =>
+            db.delete(planningReserves).where(eq(planningReserves.id, id)),
+          ),
+        );
+      }
+      {
+        const changes = changedRows(
+          input.before.state.goals,
+          input.state.goals,
+        );
+        writes.push(
+          ...changes.upserts.map((row) =>
+            db
+              .insert(planningGoals)
+              .values({ data: row, id: row.id })
+              .onConflictDoUpdate({
+                set: { data: row },
+                target: planningGoals.id,
+              }),
+          ),
+          ...changes.deleted.map((id) =>
+            db.delete(planningGoals).where(eq(planningGoals.id, id)),
+          ),
+        );
+      }
+      {
+        const changes = changedRows(
+          input.before.state.contributions,
+          input.state.contributions,
+        );
+        writes.push(
+          ...changes.upserts.map((row) =>
+            db
+              .insert(planningContributions)
+              .values({ data: row, id: row.id })
+              .onConflictDoUpdate({
+                set: { data: row },
+                target: planningContributions.id,
+              }),
+          ),
+          ...changes.deleted.map((id) =>
+            db
+              .delete(planningContributions)
+              .where(eq(planningContributions.id, id)),
+          ),
+        );
+      }
+      {
+        const changes = changedRows(
+          input.before.state.investments,
+          input.state.investments,
+        );
+        writes.push(
+          ...changes.upserts.map((row) =>
+            db
+              .insert(planningInvestments)
+              .values({ data: row, id: row.id })
+              .onConflictDoUpdate({
+                set: { data: row },
+                target: planningInvestments.id,
+              }),
+          ),
+          ...changes.deleted.map((id) =>
+            db
+              .delete(planningInvestments)
+              .where(eq(planningInvestments.id, id)),
+          ),
+        );
+      }
+      {
+        const changes = changedRows(
+          input.before.state.loans,
+          input.state.loans,
+        );
+        writes.push(
+          ...changes.upserts.map((row) =>
+            db
+              .insert(planningLoans)
+              .values({ data: row, id: row.id })
+              .onConflictDoUpdate({
+                set: { data: row },
+                target: planningLoans.id,
+              }),
+          ),
+          ...changes.deleted.map((id) =>
+            db.delete(planningLoans).where(eq(planningLoans.id, id)),
+          ),
+        );
+      }
+      {
+        const changes = changedRows(
+          input.before.state.schedules,
+          input.state.schedules,
+        );
+        writes.push(
+          ...changes.upserts.map((row) =>
+            db
+              .insert(planningSchedules)
+              .values({ data: row, id: row.id })
+              .onConflictDoUpdate({
+                set: { data: row },
+                target: planningSchedules.id,
+              }),
+          ),
+          ...changes.deleted.map((id) =>
+            db.delete(planningSchedules).where(eq(planningSchedules.id, id)),
+          ),
+        );
+      }
+      {
+        const changes = changedRows(
+          input.before.state.billPayments,
+          input.state.billPayments,
+        );
+        writes.push(
+          ...changes.upserts.map((row) =>
+            db
+              .insert(planningBillPayments)
+              .values({ data: row, id: row.id })
+              .onConflictDoUpdate({
+                set: { data: row },
+                target: planningBillPayments.id,
+              }),
+          ),
+          ...changes.deleted.map((id) =>
+            db
+              .delete(planningBillPayments)
+              .where(eq(planningBillPayments.id, id)),
+          ),
+        );
+      }
+      {
+        const changes = changedRows(
+          input.before.state.notifications,
+          input.state.notifications,
+        );
+        writes.push(
+          ...changes.upserts.map((row) =>
+            db
+              .insert(planningNotifications)
+              .values({ data: row, id: row.id })
+              .onConflictDoUpdate({
+                set: { data: row },
+                target: planningNotifications.id,
+              }),
+          ),
+          ...changes.deleted.map((id) =>
+            db
+              .delete(planningNotifications)
+              .where(eq(planningNotifications.id, id)),
+          ),
+        );
+      }
+      await db.batch([required(writes[0]), ...writes.slice(1)]);
+    },
+    async monthlyRollups(scope, months) {
+      if (!months.length) {
+        return [];
+      }
+      return await db
+        .select({
+          data: planningMonthlyRollups.data,
+          month: planningMonthlyRollups.month,
+          version: planningMonthlyRollups.version,
+        })
+        .from(planningMonthlyRollups)
+        .where(
+          and(
+            eq(planningMonthlyRollups.scope, scope),
+            sql`${planningMonthlyRollups.month} IN (SELECT value FROM json_each(${JSON.stringify(months)}))`,
+          ),
+        );
+    },
+    async read(resource) {
+      if (resource) {
+        const [version, origins, spaces, settings, persons, owners] =
+          await db.batch([
+            db.select().from(planningRevision),
+            db.select().from(connections),
+            db.select().from(planningSpaces),
+            db.select().from(planningAccounts),
+            db.select().from(people),
+            db.select().from(connectionOwners),
+          ]);
+        const state: PlanningSnapshot["state"] = {
+          accounts: settings.map((row) => row.data),
+          billPayments: [],
+          cards: [],
+          categories: [],
+          contributions: [],
+          edits: [],
+          goals: [],
+          installments: [],
+          investments: [],
+          loans: [],
+          notifications: [],
+          recurrences: [],
+          reserves: [],
+          rules: [],
+          schedules: [],
+          spaces: spaces.map((row) => row.data),
+          tags: [],
+        };
+        switch (resource) {
+          case "tags":
+            state.tags = (await db.select().from(planningTags)).map(
+              (row) => row.data,
+            );
+            break;
+          case "rules":
+            state.rules = (await db.select().from(planningRules)).map(
+              (row) => row.data,
+            );
+            break;
+          case "categories":
+            state.categories = (await db.select().from(planningCategories)).map(
+              (row) => row.data,
+            );
+            break;
+          case "notifications":
+            state.notifications = (
+              await db.select().from(planningNotifications)
+            ).map((row) => row.data);
+            break;
+          default:
+            break;
+        }
+        return {
+          accountDetails: [],
+          accounts: importedAccounts(origins, owners, persons),
+          bills: [],
+          connections: origins,
+          owners,
+          partial: origins.some(connectionPartial),
+          people: persons,
+          revision: required(version[0]).revision,
+          state,
+          transactionDetails: [],
+        };
+      }
+      const [
+        version,
+        origins,
+        spaces,
+        accounts,
+        cards,
+        edits,
+        categories,
+        tags,
+        rules,
+        recurrences,
+        reserves,
+        installments,
+        goals,
+        contributions,
+        investments,
+        loans,
+        schedules,
+        billPayments,
+        notifications,
+        bills,
+        accountDetails,
+        transactionDetails,
+        persons,
+        owners,
+      ] = await db.batch([
+        db.select().from(planningRevision),
+        db.select().from(connections),
+        db.select().from(planningSpaces),
+        db.select().from(planningAccounts),
+        db.select().from(planningCards),
+        db.select().from(planningEdits),
+        db.select().from(planningCategories),
+        db.select().from(planningTags),
+        db.select().from(planningRules),
+        db.select().from(planningRecurrences),
+        db.select().from(planningReserves),
+        db.select().from(planningInstallments),
+        db.select().from(planningGoals),
+        db.select().from(planningContributions),
+        db.select().from(planningInvestments),
+        db.select().from(planningLoans),
+        db.select().from(planningSchedules),
+        db.select().from(planningBillPayments),
+        db.select().from(planningNotifications),
+        db.select().from(planningBills),
+        db.select().from(planningAccountDetails),
+        db.select().from(planningTransactionDetails),
+        db.select().from(people),
+        db.select().from(connectionOwners),
+      ]);
+      return {
+        accountDetails: accountDetails.map((r) => r.data),
+        accounts: importedAccounts(origins, owners, persons),
+        bills: bills.map((r) => r.data),
+        connections: origins,
+        owners,
+        partial: !origins.length || origins.some(connectionPartial),
+        people: persons,
+        revision: required(version[0]).revision,
+        state: {
+          accounts: accounts.map((r) => r.data),
+          billPayments: billPayments.map((r) => r.data),
+          cards: cards.map((r) => r.data),
+          categories: categories.map((r) => r.data),
+          contributions: contributions.map((r) => r.data),
+          edits: edits.map((r) => r.data),
+          goals: goals.map((r) => r.data),
+          installments: installments.map((r) => r.data),
+          investments: investments.map((r) => r.data),
+          loans: loans.map((r) => r.data),
+          notifications: notifications.map((r) => r.data),
+          recurrences: recurrences.map((r) => r.data),
+          reserves: reserves.map((r) => r.data),
+          rules: rules.map((r) => r.data),
+          schedules: schedules.map((r) => r.data),
+          spaces: spaces.map((r) => r.data),
+          tags: tags.map((r) => r.data),
+        },
+        transactionDetails: transactionDetails.map((r) => r.data),
+      };
+    },
+    receipt(key) {
+      return db
+        .select()
+        .from(planningReceipts)
+        .where(eq(planningReceipts.id, key))
+        .get();
+    },
+    revision,
+    async saveMonthlyRollups(scope, rows: MonthlyRollup[]) {
+      if (!rows.length) {
+        return;
+      }
+      // D1 caps bound parameters per statement; 4 columns × 20 rows stays below it.
+      const writes = Array.from(
+        { length: Math.ceil(rows.length / 20) },
+        (_, chunk) =>
+          db
+            .insert(planningMonthlyRollups)
+            .values(
+              rows
+                .slice(chunk * 20, chunk * 20 + 20)
+                .map((row) => ({ ...row, scope })),
+            )
+            .onConflictDoUpdate({
+              set: {
+                data: sql`excluded.data`,
+                version: sql`excluded.version`,
+              },
+              target: [
+                planningMonthlyRollups.scope,
+                planningMonthlyRollups.month,
+              ],
+            }),
+      );
+      await db.batch([required(writes[0]), ...writes.slice(1)]);
+    },
+    async *transactions(ids, selection) {
+      if (ids) {
+        if (ids.length) {
+          yield await db
+            .select()
+            .from(transactions)
+            .where(
+              sql`${transactions.id} IN (SELECT value FROM json_each(${JSON.stringify(ids)}))`,
+            );
+        }
+        return;
+      }
+      if (selection && !selection.accountIds.length) {
+        return;
+      }
+      const order = sourceOrder(selection ? selection.order : "id");
+      const filter = sourceFilter(selection);
+      const pageSize = selection?.pageSize ?? 5000;
+      async function* pages(
+        after?: string,
+      ): AsyncGenerator<TransactionProjection[]> {
+        const rows = await db
+          .select()
+          .from(transactions)
+          .where(and(filter, order.following(after)))
+          .orderBy(...order.columns)
+          .limit(pageSize);
+        if (!rows.length) {
+          return;
+        }
+        yield rows;
+        if (rows.length === pageSize) {
+          yield* pages(order.key(required(rows.at(-1))));
+        }
+      }
+      yield* pages(selection?.after);
+    },
+  };
+}

@@ -1,0 +1,1 @@
+export { fetchMcp } from "./controller";

@@ -1,0 +1,240 @@
+import { Combobox } from "@cloudflare/kumo/components/combobox";
+import type { DateRange } from "@cloudflare/kumo/components/date-picker";
+import { Input } from "@cloudflare/kumo/components/input";
+import { Loader } from "@cloudflare/kumo/components/loader";
+import { Popover } from "@cloudflare/kumo/components/popover";
+import { CalendarIcon } from "@phosphor-icons/react";
+import { type ChangeEvent, lazy, Suspense, useCallback, useState } from "react";
+
+import type { Person } from "../../domain";
+import { UiButton } from "../ui";
+import { type AccountAppearance, AccountIdentity } from "./account-identity";
+import { type CategoryAppearance, CategoryLabel } from "./category-appearance";
+
+const Calendar = lazy(async () => {
+  const { DatePicker } = await import(
+    "@cloudflare/kumo/components/date-picker"
+  );
+  return { default: DatePicker };
+});
+
+interface CatalogOption {
+  account?: AccountAppearance;
+  appearance?: CategoryAppearance;
+  label: string;
+  owner?: Person | undefined;
+  value: string;
+}
+
+export function AccountFilter({
+  accounts,
+  value,
+  showOwner = false,
+}: {
+  accounts: Array<
+    AccountAppearance & { id: string; personId?: string; personName?: string }
+  >;
+  value: string;
+  showOwner?: boolean;
+}) {
+  if (accounts.length < 2) {
+    return (
+      <input
+        name="accountId"
+        type="hidden"
+        value={value}
+      />
+    );
+  }
+  const items = [
+    { label: "Todas as contas", value: "" },
+    ...accounts.map((account) => ({
+      account,
+      label: account.name,
+      owner:
+        showOwner && account.personId && account.personName
+          ? { id: account.personId, name: account.personName }
+          : undefined,
+      value: account.id,
+    })),
+  ];
+  return (
+    <CatalogField
+      defaultValue={value}
+      items={items}
+      label="Conta"
+      name="accountId"
+    />
+  );
+}
+function optionLabel(item: CatalogOption) {
+  return item.label;
+}
+function optionValue(item: CatalogOption) {
+  return item.value;
+}
+function renderOption(item: CatalogOption) {
+  return (
+    <Combobox.Item
+      key={item.value}
+      value={item}
+    >
+      {!!item.account && (
+        <AccountIdentity
+          account={item.account}
+          person={item.owner}
+        />
+      )}
+      {!item.account &&
+        (item.appearance ? (
+          <CategoryLabel
+            category={item.appearance}
+            label={item.label}
+          />
+        ) : (
+          item.label
+        ))}
+    </Combobox.Item>
+  );
+}
+
+export function CatalogField({
+  label,
+  name,
+  defaultValue,
+  items,
+}: {
+  label: string;
+  name: string;
+  defaultValue: string;
+  items: CatalogOption[];
+}) {
+  return (
+    <Combobox
+      defaultValue={items.find((item) => item.value === defaultValue) ?? null}
+      items={items}
+      itemToStringLabel={optionLabel}
+      itemToStringValue={optionValue}
+      label={label}
+      name={name}
+    >
+      <Combobox.TriggerInput
+        clearLabel="Limpar seleção"
+        placeholder="Selecione ou busque"
+        showOptionsLabel="Mostrar opções"
+      />
+      <Combobox.Content>
+        <Combobox.Empty>Nenhuma opção encontrada.</Combobox.Empty>
+        <Combobox.List>{renderOption}</Combobox.List>
+      </Combobox.Content>
+    </Combobox>
+  );
+}
+
+const calendarDayPattern = /^\d{4}-\d{2}-\d{2}$/;
+function calendarDay(value: string) {
+  if (!calendarDayPattern.test(value)) {
+    return;
+  }
+  const [year = 0, month = 0, day = 0] = value.split("-").map(Number);
+  return new Date(year, month - 1, day);
+}
+function inputDay(value: Date | undefined) {
+  if (!value) {
+    return "";
+  }
+  return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, "0")}-${String(value.getDate()).padStart(2, "0")}`;
+}
+const formatters = {
+  formatCaption: (date: Date) =>
+    date.toLocaleDateString("pt-BR", { month: "long", year: "numeric" }),
+  formatWeekdayName: (date: Date) =>
+    date.toLocaleDateString("pt-BR", { weekday: "short" }),
+};
+const calendarLabels = {
+  labelDayButton: (date: Date) =>
+    date.toLocaleDateString("pt-BR", { dateStyle: "full" }),
+  labelGrid: (date: Date) =>
+    date.toLocaleDateString("pt-BR", { month: "long", year: "numeric" }),
+  labelNav: () => "Navegação do calendário",
+  labelNext: () => "Próximo mês",
+  labelPrevious: () => "Mês anterior",
+};
+
+// Dates are civil dates from the provider; no UTC conversion or invented timezone.
+export function DateRangeFields({
+  from: initialFrom,
+  to: initialTo,
+}: {
+  from: string;
+  to: string;
+}) {
+  const [from, setFrom] = useState(initialFrom);
+  const [to, setTo] = useState(initialTo);
+  const onFrom = useCallback(
+    (event: ChangeEvent<HTMLInputElement>) =>
+      setFrom(event.currentTarget.value),
+    [],
+  );
+  const onTo = useCallback(
+    (event: ChangeEvent<HTMLInputElement>) => setTo(event.currentTarget.value),
+    [],
+  );
+  const onRange = useCallback((range: DateRange | undefined) => {
+    setFrom(inputDay(range?.from));
+    setTo(inputDay(range?.to));
+  }, []);
+  return (
+    <div className="date-range-fields">
+      <div className="editor-grid">
+        <Input
+          label="De"
+          name="from"
+          onChange={onFrom}
+          type="date"
+          value={from}
+        />
+        <Input
+          label="Até"
+          name="to"
+          onChange={onTo}
+          type="date"
+          value={to}
+        />
+      </div>
+      <Popover>
+        <Popover.Trigger
+          render={
+            <UiButton
+              type="button"
+              variant="secondary"
+            />
+          }
+        >
+          <CalendarIcon
+            aria-hidden
+            size={16}
+          />
+          Escolher no calendário
+        </Popover.Trigger>
+        <Popover.Content className="transaction-calendar">
+          <Popover.Title>Período das transações</Popover.Title>
+          <Suspense fallback={<Loader aria-label="Carregando calendário" />}>
+            <Calendar
+              formatters={formatters}
+              labels={calendarLabels}
+              mode="range"
+              numberOfMonths={1}
+              onChange={onRange}
+              selected={{ from: calendarDay(from), to: calendarDay(to) }}
+            />
+          </Suspense>
+          <p>
+            Datas conforme a origem. Digite nos campos para usar somente um
+            limite.
+          </p>
+        </Popover.Content>
+      </Popover>
+    </div>
+  );
+}

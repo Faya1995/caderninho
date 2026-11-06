@@ -1,0 +1,846 @@
+import assert from "node:assert/strict";
+
+import { beforeEach, test } from "vitest";
+
+import {
+  FinancialOverviewResponseSchema,
+  MonthlySpendingResponseSchema,
+  PlanningCommandSchema,
+  PortalTransactionListSchema,
+  PortalTransactionQuerySchema,
+  SyncHistoryResultSchema,
+  TransactionListSchema,
+  WorkspaceCatalogSchema,
+} from "../../src/contracts";
+import { createPlanningService } from "../../src/worker/planning";
+import { createPlanningRepository } from "../../src/worker/planning/repository";
+import { createSyncRepository } from "../../src/worker/sync/repository";
+import { createSyncHistoryRepository } from "../../src/worker/sync/repository/history.repository";
+import { command, cookies, fixture, login } from "./access-fixture";
+import { account, collect, setup, source, transaction } from "./fixture";
+import { env } from "cloudflare:workers";
+
+const bootState =
+  /<script id="account-boot" type="application\/json">([^<]*)<\/script>/;
+
+beforeEach(setup);
+
+test("an exact portal transaction expands all received installments across months and only confirms linked invoice payments", async () => {
+  const metadata = {
+    cardNumber: "4242",
+    purchaseDate: "2026-05-01",
+    totalInstallments: 4,
+  };
+  const rows = [
+    {
+      billId: "may-bill",
+      date: "2026-05-01",
+      id: "first",
+      status: "POSTED" as const,
+    },
+    {
+      billId: "june-bill",
+      date: "2026-06-01",
+      id: "second",
+      status: "POSTED" as const,
+    },
+    {
+      billId: "nov-bill",
+      date: "2026-11-01",
+      id: "third",
+      status: "PENDING" as const,
+    },
+    {
+      billId: "foreign-bill",
+      date: "2026-12-01",
+      id: "fourth",
+      status: "POSTED" as const,
+    },
+  ].map((row, index) =>
+    transaction({
+      amount: "-100.35",
+      description: "Structured purchase",
+      ...row,
+      creditCardMetadata: {
+        ...metadata,
+        billId: row.billId,
+        installmentNumber: index + 1,
+      },
+    }),
+  );
+  const bill = (
+    id: string,
+    accountId: string,
+    dueDate: string,
+    paid = false,
+  ) => ({
+    accountId,
+    amountMinor: "10035",
+    charges: [],
+    currency: "BRL",
+    dueDate,
+    id,
+    minimumMinor: null,
+    observedAt: "2026-10-24T15:00:00Z",
+    payments: paid
+      ? [{ amountMinor: "10035", currency: "BRL", date: "2026-06-02" }]
+      : [],
+  });
+  await collect({
+    ...source(rows, [
+      account({ type: "CREDIT" }),
+      account({ id: "b", type: "CREDIT" }),
+    ]),
+    products: (input) => {
+      if (input.kind !== "bills") {
+        return Promise.resolve({ kind: input.kind, next: null, records: [] });
+      }
+      return Promise.resolve({
+        kind: "bills",
+        next: null,
+        records:
+          input.id === "b"
+            ? [bill("foreign-bill", "b", "2026-12-02")]
+            : [
+                bill("may-bill", "a", "2026-06-02"),
+                bill("june-bill", "a", "2026-07-02", true),
+                bill("nov-bill", "a", "2026-12-02"),
+              ],
+      });
+    },
+  });
+  const service = createPlanningService(
+    createPlanningRepository(env.DB),
+    () => new Date("2026-10-24T15:00:00Z"),
+  );
+  await service.execute(
+    PlanningCommandSchema.parse({
+      confirmed: true,
+      id: "june-bill",
+      idempotency_key: "synthetic-june-paid",
+      spaceId: "personal",
+      tool: "mark_bill_paid",
+    }),
+  );
+  const query = PortalTransactionQuerySchema.parse({
+    accountId: "a",
+    include_ignored: true,
+    limit: 1,
+    spaceId: "personal",
+    tool: "get_portal_transactions",
+    transactionId: "third",
+  });
+  const result = PortalTransactionListSchema.parse(
+    await service.portalTransactions(query),
+  );
+  const [purchase] = result.data.records;
+  assert.equal(purchase?.anchorDate, "2026-05-01");
+  assert.deepEqual(
+    purchase?.installments.map((row) => row.id),
+    ["first", "second", "third", "fourth"],
+  );
+  assert.deepEqual(
+    purchase?.installments.map((row) => row.amountMinor),
+    ["-10035", "-10035", "-10035", "-10035"],
+  );
+  assert.deepEqual(
+    purchase?.installments.map((row) => row.billPayment),
+    ["bank", "manual", null, null],
+  );
+  assert.equal(purchase?.installments[2]?.status, "PENDING");
+  assert.equal(result.data.cursor, null);
+  const wrongAccount = PortalTransactionListSchema.parse(
+    await service.portalTransactions({ ...query, accountId: "b" }),
+  );
+  assert.deepEqual(wrongAccount.data.records, []);
+  const missing = PortalTransactionListSchema.parse(
+    await service.portalTransactions({
+      ...query,
+      transactionId: "not-received",
+    }),
+  );
+  assert.deepEqual(missing.data.records, []);
+});
+
+test("uncategorized filtering precedes pagination and keeps a purchase when only a later installment lacks a category", async () => {
+  await collect(
+    source(
+      [
+        transaction({
+          category: "Groceries",
+          date: "2026-10-20",
+          id: "categorized",
+        }),
+        transaction({ category: null, date: "2026-10-19", id: "missing" }),
+        transaction({
+          category: "Groceries",
+          creditCardMetadata: {
+            installmentNumber: 1,
+            purchaseDate: "2026-10-10",
+            totalInstallments: 2,
+          },
+          date: "2026-10-10",
+          description: "Course",
+          id: "first",
+        }),
+        transaction({
+          category: null,
+          creditCardMetadata: {
+            installmentNumber: 2,
+            purchaseDate: "2026-10-10",
+            totalInstallments: 2,
+          },
+          date: "2026-11-10",
+          description: "Course",
+          id: "second",
+        }),
+      ],
+      [account({ type: "CREDIT" })],
+    ),
+  );
+  const service = createPlanningService(
+    createPlanningRepository(env.DB),
+    () => new Date("2026-10-24T15:00:00Z"),
+  );
+  const input = {
+    limit: 1,
+    spaceId: "personal",
+    tool: "get_transaction_purchases",
+    uncategorized: true,
+  };
+  const first = PortalTransactionListSchema.parse(
+    await service.execute(PlanningCommandSchema.parse(input)),
+  );
+  assert.deepEqual(
+    first.data.records.map((row) => row.id),
+    ["missing"],
+  );
+  assert.ok(first.data.cursor);
+  assert.equal(first.data.uncategorizedCount, 2);
+  const second = PortalTransactionListSchema.parse(
+    await service.execute(
+      PlanningCommandSchema.parse({ ...input, cursor: first.data.cursor }),
+    ),
+  );
+  assert.deepEqual(
+    second.data.records[0]?.installments.map((row) => row.id),
+    ["first", "second"],
+  );
+  assert.equal(second.data.cursor, null);
+  assert.equal(second.data.uncategorizedCount, 2);
+  const filtered = PortalTransactionListSchema.parse(
+    await service.execute(
+      PlanningCommandSchema.parse({ ...input, text: "Course" }),
+    ),
+  );
+  assert.equal(filtered.data.uncategorizedCount, 1);
+  await assert.rejects(
+    service.execute(
+      PlanningCommandSchema.parse({
+        ...input,
+        cursor: first.data.cursor,
+        uncategorized: false,
+      }),
+    ),
+    { message: "RESTART_REQUIRED" },
+  );
+  const occurrences = TransactionListSchema.parse(
+    await service.execute(
+      PlanningCommandSchema.parse({
+        spaceId: "personal",
+        tool: "get_transactions",
+        uncategorized: true,
+      }),
+    ),
+  );
+  assert.deepEqual(occurrences.data.records.map((row) => row.id).sort(), [
+    "missing",
+    "second",
+  ]);
+});
+
+test("portal categorization is revision checked, idempotent and category only while preserving source money and later imports", async () => {
+  const imported = transaction({
+    amount: "-9007199254740993.01",
+    category: null,
+    date: "2026-10-20",
+    description: "Synthetic merchant",
+    id: "uncategorized",
+  });
+  await collect(source([imported]));
+  const app = fixture();
+  const cookie = cookies(await login(app));
+  const query = {
+    future: false,
+    limit: 1,
+    order: "date_desc",
+    spaceId: "personal",
+    tool: "get_portal_transactions",
+  };
+  const before = PortalTransactionListSchema.parse(
+    await (await command(app, cookie, "query", { query })).json(),
+  );
+  const catalog = WorkspaceCatalogSchema.parse(
+    await (
+      await app.request("/api/account/catalog?spaceId=personal", {
+        headers: { Cookie: cookie },
+      })
+    ).json(),
+  );
+  const category = catalog.categories.find(
+    (item) => item.kind === "expense" && !item.hidden,
+  );
+  assert.ok(category);
+  const edit = {
+    category: category.id,
+    confirmed: true,
+    expected_revision: before.data.revision,
+    idempotency_key: "manual-category",
+    ids: ["uncategorized"],
+    spaceId: "personal",
+    tool: "batch_edit_transactions",
+  };
+  const rejected = await Promise.all(
+    [
+      { ...edit, amountMinor: "1" },
+      { ...edit, direction: "CREDIT" },
+      { ...edit, confirmed: false },
+      { ...edit, expected_revision: undefined },
+    ].map((forbidden) =>
+      command(app, cookie, "planning", { command: forbidden }),
+    ),
+  );
+  assert.deepEqual(
+    rejected.map((response) => response.status),
+    [400, 400, 400, 400],
+  );
+  assert.equal(
+    (await command(app, cookie, "planning", { command: edit })).status,
+    200,
+  );
+  assert.equal(
+    (await command(app, cookie, "planning", { command: edit })).status,
+    200,
+  );
+  assert.equal(
+    (
+      await command(app, cookie, "planning", {
+        command: { ...edit, category: null, idempotency_key: "stale-category" },
+      })
+    ).status,
+    409,
+  );
+  await collect(source([imported]));
+  const service = createPlanningService(createPlanningRepository(env.DB));
+  const result = TransactionListSchema.parse(
+    await service.execute(
+      PlanningCommandSchema.parse({
+        spaceId: "personal",
+        tool: "get_transactions",
+      }),
+    ),
+  );
+  const row = result.data.records.find((item) => item.id === "uncategorized");
+  assert.equal(row?.category, category.id);
+  assert.equal(row?.amountMinor, "-900719925474099301");
+  assert.equal(row?.direction, "DEBIT");
+  assert.equal(row?.description, "Synthetic merchant");
+  const after = PortalTransactionListSchema.parse(
+    await service.execute(
+      PlanningCommandSchema.parse({
+        ...query,
+        tool: "get_transaction_purchases",
+      }),
+    ),
+  );
+  assert.equal(after.data.uncategorizedCount, 0);
+});
+
+test("purchase cursors require a restart when the financial day changes", async () => {
+  await collect(
+    source([
+      transaction({ date: "2026-10-22", id: "old" }),
+      transaction({ date: "2026-10-23", id: "current" }),
+      transaction({ date: "2026-10-24", id: "next-day" }),
+    ]),
+  );
+  let now = new Date("2026-10-24T02:59:59Z");
+  const service = createPlanningService(
+    createPlanningRepository(env.DB),
+    () => now,
+  );
+  const input = {
+    limit: 1,
+    spaceId: "personal",
+    tool: "get_transaction_purchases",
+  };
+  const first = PortalTransactionListSchema.parse(
+    await service.execute(PlanningCommandSchema.parse(input)),
+  );
+  assert.equal(first.data.referenceDay, "2026-10-23");
+  assert.equal(first.data.records[0]?.id, "current");
+  assert.ok(first.data.cursor);
+  now = new Date("2026-10-24T03:00:00Z");
+  await assert.rejects(
+    service.execute(
+      PlanningCommandSchema.parse({ ...input, cursor: first.data.cursor }),
+    ),
+    { message: "RESTART_REQUIRED" },
+  );
+  const fresh = PortalTransactionListSchema.parse(
+    await service.execute(PlanningCommandSchema.parse(input)),
+  );
+  assert.equal(fresh.data.referenceDay, "2026-10-24");
+  assert.equal(fresh.data.records[0]?.id, "next-day");
+});
+
+test("run history survives later imports, preserves admission ownership and paginates without duplicate retries", async () => {
+  const history = createSyncHistoryRepository(env.DB);
+  const original = await collect(source([transaction()]));
+  const repeated = await createSyncRepository(env.DB).admit(
+    ["c"],
+    "2026-10-01T01:00:00Z",
+  );
+  assert.equal(repeated[0]?.status, "cooldown");
+  await env.DB.prepare("INSERT INTO people(id,name) VALUES('ana','Ana')").run();
+  await env.DB.prepare(
+    "UPDATE connection_owners SET person_id='ana' WHERE connection_id='c'",
+  ).run();
+  const newer = await collect(
+    source([transaction({ amount: "-25.00" })]),
+    "2026-10-02T00:00:00Z",
+  );
+  const first = SyncHistoryResultSchema.parse(
+    await history.query({ limit: 1 }),
+  );
+  assert.equal(first.records[0]?.id, newer);
+  assert.equal(first.records[0]?.personId, "ana");
+  assert.equal(first.records[0]?.status, "succeeded");
+  assert.ok(first.records[0]?.finishedAt);
+  assert.ok(first.cursor);
+  const second = await history.query({ cursor: first.cursor, limit: 1 });
+  assert.equal(second.records[0]?.id, original);
+  assert.equal(second.records[0]?.personId, "self");
+  assert.equal(second.cursor, null);
+  assert.equal((await history.query({ limit: 25 })).records.length, 2);
+  assert.equal(
+    (await history.query({ limit: 25, personId: "self" })).records.length,
+    1,
+  );
+  assert.equal(
+    (await history.query({ limit: 25, status: "failed" })).records.length,
+    0,
+  );
+  await assert.rejects(history.query({ cursor: '{"id":"bad"}', limit: 1 }));
+});
+
+test("durable failures record the committed checkpoint and atomic publication guards do not add history rows", async () => {
+  const history = createSyncHistoryRepository(env.DB);
+  await assert.rejects(collect(source([transaction({ amount: "bad" })])));
+  const page = await history.query({ limit: 25, status: "failed" });
+  assert.equal(page.records.length, 1);
+  assert.equal(page.records[0]?.status, "failed");
+  assert.equal(page.records[0]?.phase, "transactions");
+  assert.equal(page.records[0]?.sequence, 1);
+  assert.ok(page.records[0]?.error);
+  const repo = createSyncRepository(env.DB);
+  const run = await repo.read(page.records[0]?.id ?? "missing");
+  await assert.rejects(
+    repo.publish({
+      done: true,
+      next: run.checkpoint,
+      now: "2026-10-01T00:00:00Z",
+      run,
+    }),
+  );
+  assert.deepEqual((await history.query({ limit: 25 })).records, page.records);
+});
+
+test("workspace routes require session, query CSRF and an explicit read-only tool allowlist", async () => {
+  const app = fixture();
+  const responses = await Promise.all(
+    ["/api/account/catalog", "/api/account/history"].map((path) =>
+      app.request(path),
+    ),
+  );
+  assert.deepEqual(
+    responses.map((response) => response.status),
+    [401, 401],
+  );
+  assert.equal((await app.request("/account/transactions")).status, 302);
+  const cookie = cookies(await login(app));
+  const page = await app.request("/account/rules", {
+    headers: { Cookie: cookie },
+  });
+  assert.equal(page.status, 200);
+  assert.equal(page.headers.get("Cache-Control"), "no-store");
+  const html = await page.text();
+  assert.ok(html.includes("account-root"));
+  // The page carries the same state as GET /api/account, escaped for HTML.
+  const boot = bootState.exec(html)?.[1];
+  assert.ok(boot);
+  const state = JSON.parse(boot);
+  assert.equal(typeof state.csrf, "string");
+  assert.ok(Array.isArray(state.connections));
+  assert.equal(state.page, undefined);
+  // Transactions arrive with their first answers, keyed as the page asks.
+  const transactions = await app.request("/account/transactions", {
+    headers: { Cookie: cookie },
+  });
+  const inline = JSON.parse(
+    bootState.exec(await transactions.text())?.[1] ?? "{}",
+  );
+  assert.deepEqual(
+    inline.page.results.map((result: { tool: string }) => result.tool),
+    ["get_accounts", "get_portal_transactions"],
+  );
+  assert.equal(inline.page.catalog.spaceId, "personal");
+  const catalog = await app.request("/api/account/catalog", {
+    headers: { Cookie: cookie },
+  });
+  assert.equal(catalog.headers.get("Cache-Control"), "no-store");
+  assert.equal(
+    WorkspaceCatalogSchema.parse(await catalog.json()).spaces[0]?.id,
+    "personal",
+  );
+  const rejected = await command(app, cookie, "query", {
+    query: { name: "Bad", spaceId: "personal", tool: "create_rule" },
+  });
+  assert.equal(rejected.status, 400);
+  const csrf = await command(app, cookie, "query", {
+    csrf: "wrong",
+    query: { tool: "get_transactions" },
+  });
+  assert.equal(csrf.status, 403);
+});
+
+test("transaction page reads exact effective amounts, person filters and date order across page boundaries", async () => {
+  await collect(
+    source(
+      Array.from({ length: 65 }, (_, i) =>
+        transaction({
+          amount: "-9007199254740993.01",
+          date: `2026-10-${String(1 + (i % 20)).padStart(2, "0")}`,
+          id: `t-${String(i).padStart(3, "0")}`,
+        }),
+      ),
+      [account()],
+    ),
+  );
+  const app = fixture();
+  const cookie = cookies(await login(app));
+  const query = {
+    limit: 50,
+    order: "date_desc",
+    personId: "self",
+    spaceId: "personal",
+    tool: "get_transactions",
+  };
+  const first = TransactionListSchema.parse(
+    await (await command(app, cookie, "query", { query })).json(),
+  );
+  assert.equal(first.data.records.length, 50);
+  assert.equal(first.data.records[0]?.date, "2026-10-20");
+  assert.equal(first.data.records[0]?.amountMinor, "-900719925474099301");
+  assert.ok(first.data.cursor);
+  const second = TransactionListSchema.parse(
+    await (
+      await command(app, cookie, "query", {
+        query: { ...query, cursor: first.data.cursor },
+      })
+    ).json(),
+  );
+  assert.equal(second.data.records.length, 15);
+  const rows = [...first.data.records, ...second.data.records];
+  assert.equal(new Set(rows.map((r) => r.id)).size, 65);
+  assert.deepEqual(
+    rows.map((r) => `${r.date}:${r.id}`),
+    rows
+      .map((r) => `${r.date}:${r.id}`)
+      .sort()
+      .reverse(),
+  );
+});
+
+test("portal groups card installments before pagination and keeps future and pending distinct", async () => {
+  const purchaseDate = "2024-01-12";
+  await collect(
+    source(
+      [
+        transaction({
+          accountId: "a",
+          creditCardMetadata: {
+            cardNumber: "1234",
+            installmentNumber: 1,
+            purchaseDate,
+            totalInstallments: 3,
+          },
+          date: "2024-01-12",
+          description: "Villas De Paraty",
+          id: "card-1",
+        }),
+        transaction({
+          accountId: "a",
+          creditCardMetadata: {
+            cardNumber: "1234",
+            installmentNumber: 2,
+            purchaseDate,
+            totalInstallments: 3,
+          },
+          date: "2024-02-23",
+          description: "Villas De Paraty",
+          id: "card-2",
+          status: "PENDING",
+        }),
+        transaction({
+          accountId: "a",
+          creditCardMetadata: {
+            cardNumber: "1234",
+            installmentNumber: 3,
+            purchaseDate,
+            totalInstallments: 3,
+          },
+          date: "2099-03-26",
+          description: "Villas De Paraty",
+          id: "card-3",
+          status: "PENDING",
+        }),
+        transaction({
+          accountId: "b",
+          date: "2099-04-01",
+          description: "Scheduled bank payment",
+          id: "future-bank",
+          status: "PENDING",
+        }),
+        transaction({
+          accountId: "b",
+          date: "2024-01-01",
+          description: "Past bank payment",
+          id: "past-bank",
+        }),
+      ],
+      [
+        account({ name: "Card", type: "CREDIT" }),
+        account({ id: "b", name: "Bank", type: "BANK" }),
+      ],
+    ),
+  );
+  const app = fixture();
+  const cookie = cookies(await login(app));
+  const query = {
+    future: false,
+    limit: 1,
+    order: "date_desc",
+    spaceId: "personal",
+    tool: "get_portal_transactions",
+  };
+  const first = PortalTransactionListSchema.parse(
+    await (await command(app, cookie, "query", { query })).json(),
+  );
+  assert.equal(first.data.records.length, 1);
+  assert.equal(first.data.records[0]?.anchorDate, purchaseDate);
+  assert.equal(first.data.records[0]?.anchorKind, "purchase");
+  assert.deepEqual(
+    first.data.records[0]?.installments.map((row) => [
+      row.id,
+      row.installmentNumber,
+      row.status,
+    ]),
+    [
+      ["card-1", 1, "POSTED"],
+      ["card-2", 2, "PENDING"],
+      ["card-3", 3, "PENDING"],
+    ],
+  );
+  assert.ok(first.data.cursor);
+  const second = PortalTransactionListSchema.parse(
+    await (
+      await command(app, cookie, "query", {
+        query: { ...query, cursor: first.data.cursor },
+      })
+    ).json(),
+  );
+  assert.deepEqual(
+    second.data.records.map((row) => row.id),
+    ["past-bank"],
+  );
+  const upcoming = PortalTransactionListSchema.parse(
+    await (
+      await command(app, cookie, "query", {
+        query: { ...query, future: true, limit: 50 },
+      })
+    ).json(),
+  );
+  assert.deepEqual(
+    upcoming.data.records.map((row) => row.id),
+    ["future-bank"],
+  );
+  const pending = PortalTransactionListSchema.parse(
+    await (
+      await command(app, cookie, "query", {
+        query: {
+          ...query,
+          from: "2024-01-12",
+          limit: 50,
+          status: "PENDING",
+          to: "2024-01-12",
+        },
+      })
+    ).json(),
+  );
+  assert.deepEqual(
+    pending.data.records[0]?.installments.map((row) => row.id),
+    ["card-1", "card-2", "card-3"],
+  );
+  assert.equal(pending.data.records.length, 1);
+  assert.equal(
+    (
+      await command(app, cookie, "query", {
+        query: { ...query, cursor: first.data.cursor, status: "PENDING" },
+      })
+    ).status,
+    409,
+  );
+});
+
+test("ambiguous card purchases stay separate instead of merging equal merchants", async () => {
+  await collect(
+    source(
+      [1, 2, 3, 4].map((number) =>
+        transaction({
+          creditCardMetadata: {
+            installmentNumber: number % 2 ? 1 : 2,
+            purchaseDate: "2024-05-12",
+            totalInstallments: 2,
+          },
+          date: number % 2 ? "2024-05-12" : "2024-06-12",
+          description: "Same merchant",
+          id: `ambiguous-${number}`,
+        }),
+      ),
+      [account({ type: "CREDIT" })],
+    ),
+  );
+  const app = fixture();
+  const cookie = cookies(await login(app));
+  const page = PortalTransactionListSchema.parse(
+    await (
+      await command(app, cookie, "query", {
+        query: {
+          future: false,
+          limit: 50,
+          order: "date_desc",
+          spaceId: "personal",
+          tool: "get_portal_transactions",
+        },
+      })
+    ).json(),
+  );
+  assert.equal(page.data.records.length, 4);
+  assert.ok(page.data.records.every((row) => row.installments.length === 0));
+});
+
+test("card installments without purchase date use the first observed installment month", async () => {
+  await collect(
+    source(
+      [
+        ["first", 1, "2024-12-26"],
+        ["second", 2, "2025-01-26"],
+        ["third", 3, "2025-02-23"],
+      ].map(([id, installmentNumber, date]) =>
+        transaction({
+          amount: "-390.66",
+          creditCardMetadata: {
+            installmentNumber: Number(installmentNumber),
+            totalInstallments: 3,
+          },
+          date: String(date),
+          description: "Villas De Paraty",
+          id: String(id),
+        }),
+      ),
+      [account({ type: "CREDIT" })],
+    ),
+  );
+  const app = fixture();
+  const cookie = cookies(await login(app));
+  const page = PortalTransactionListSchema.parse(
+    await (
+      await command(app, cookie, "query", {
+        query: {
+          future: false,
+          limit: 50,
+          order: "date_desc",
+          spaceId: "personal",
+          tool: "get_portal_transactions",
+        },
+      })
+    ).json(),
+  );
+  assert.equal(page.data.records.length, 1);
+  assert.equal(page.data.records[0]?.anchorDate, "2024-12-26");
+  assert.equal(page.data.records[0]?.anchorKind, "first_seen");
+  assert.equal(page.data.records[0]?.installments.length, 3);
+});
+
+test("owner dashboard reads the whole period with exact money and separate currencies beyond transaction pagination", async () => {
+  await collect(
+    source(
+      [
+        ...Array.from({ length: 65 }, (_, index) =>
+          transaction({
+            amount: "-9007199254740993.01",
+            id: `dashboard-${index}`,
+          }),
+        ),
+        transaction({
+          accountId: "usd",
+          amount: "-5",
+          currencyCode: "USD",
+          id: "usd",
+        }),
+      ],
+      [account(), account({ currencyCode: "USD", id: "usd" })],
+    ),
+  );
+  const app = fixture();
+  const cookie = cookies(await login(app));
+  const period = { from: "2026-10-01", spaceId: "personal", to: "2026-10-31" };
+  const response = await command(app, cookie, "query", {
+    query: { tool: "get_overview", ...period },
+  });
+  assert.equal(response.status, 200);
+  const { data } = FinancialOverviewResponseSchema.parse(await response.json());
+  const total = data.totals.find((row) => row.currency === "BRL");
+  assert.equal(total?.count, 65);
+  assert.equal(total?.cashFlowMinor, (-900719925474099301n * 65n).toString());
+  assert.equal(
+    data.totals.find((row) => row.currency === "USD")?.cashFlowMinor,
+    "-500",
+  );
+  assert.equal(data.accounts.length, 2);
+  const chart = await command(app, cookie, "query", {
+    query: {
+      tool: "generate_chart",
+      ...period,
+      groupBy: "month",
+      type: "line",
+    },
+  });
+  assert.equal(chart.status, 200);
+  assert.equal(
+    MonthlySpendingResponseSchema.parse(await chart.json()).data.totals.find(
+      (row) => row.currency === "BRL",
+    )?.cashFlowMinor,
+    total?.cashFlowMinor,
+  );
+  assert.equal(
+    (
+      await command(app, cookie, "query", {
+        csrf: "wrong",
+        query: { tool: "get_overview", ...period },
+      })
+    ).status,
+    403,
+  );
+});

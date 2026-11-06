@@ -1,0 +1,47 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import { Fault, FaultCode } from "../../domain";
+import { tryCatch } from "..";
+
+await test("tryCatch preserves falsy successes and normalizes rejected or synchronously thrown values", async () => {
+  await Promise.all(
+    ([null, 0, false, ""] as const).map(async (value) => {
+      const { data, error } = await tryCatch(() => Promise.resolve(value));
+      assert.equal(data, value);
+      assert.equal(error, null);
+    }),
+  );
+
+  await Promise.all(
+    (
+      [
+        ["failure", "failure"],
+        [null, "null"],
+        [7, "7"],
+        [{ reason: "synthetic" }, "[object Object]"],
+      ] as const
+    ).map(async ([caught, expected]) => {
+      await Promise.all(
+        [
+          () => Promise.reject(caught),
+          () => {
+            throw caught;
+          },
+        ].map(async (operation) => {
+          const { data, error } = await tryCatch(operation);
+          assert.equal(data, null);
+          assert.ok(error instanceof Error);
+          assert.equal(error.message, expected);
+        }),
+      );
+    }),
+  );
+
+  const fault = new Fault(FaultCode.UPSTREAM_RATE_LIMIT);
+  fault.details = { retryAfterSeconds: 42 };
+  const { data, error } = await tryCatch(Promise.reject(fault));
+  assert.equal(data, null);
+  assert.equal(error, fault);
+  assert.deepEqual(error.details, { retryAfterSeconds: 42 });
+});
